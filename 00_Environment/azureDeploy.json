@@ -1,0 +1,189 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "location": {
+            "type": "string",
+            "defaultValue": "[resourceGroup().location]"
+        },
+        "base_name": {
+            "type": "string"
+        },
+        "landscape_name": {
+            "type": "string"
+        },
+        "sql_login": {
+            "type": "securestring"
+
+        },
+        "sql_pass": {
+            "type": "securestring"
+        },
+        "grant_ip": {
+            "type": "string"
+        }
+    },
+    "functions": [],
+    "variables": {
+        "sql_name": "[concat(parameters('landscape_name'),'-sql-',parameters('base_name'))]",
+        "sql_url": "[concat(variables('sql_name'),'.database.windows.net')]",
+        "db_name": "[concat(parameters('landscape_name'),'-db-',parameters('base_name'))]",
+        "sql_connection_string": "[concat('Integrated Security=False;Encrypt=True;Connection Timeout=30;Data Source=',variables('sql_url'),';Initial Catalog=',variables('db_name'))]",
+        "adf_name": "[concat(parameters('landscape_name'),'-adf-',parameters('base_name'))]",
+        "akv_name": "[concat(parameters('landscape_name'),'-akv-',parameters('base_name'))]",
+        "akvurl": "[concat('https://',variables('akv_name'),'.vault.azure.net/')]"
+    },
+    "resources": [
+        {
+            "name": "[variables('sql_name')]",
+            "type": "Microsoft.Sql/servers",
+            "apiVersion": "2020-02-02-preview",
+            "location": "[parameters('location')]",
+            "properties": {
+                "administratorLogin": "[parameters('sql_login')]",
+                "administratorLoginPassword": "[parameters('sql_pass')]"
+            },
+            "resources": [
+                {
+                    "name": "[variables('db_name')]",
+                    "type": "databases",
+                    "apiVersion": "2020-02-02-preview",
+                    "location": "[parameters('location')]",
+                    "dependsOn": [
+                        "[resourceId('Microsoft.Sql/servers', variables('sql_name'))]"
+                    ],
+                    "properties": {
+                        "collation": "SQL_Latin1_General_CP1_CI_AS",
+                        "edition": "Basic",
+                        "maxSizeBytes": "1073741824",
+                        "requestedServiceObjectiveName": "Basic"
+                    }
+                },
+                {
+                    "type": "firewallRules",
+                    "apiVersion": "2020-02-02-preview",
+                    "dependsOn": [
+                        "[resourceId('Microsoft.Sql/servers', variables('sql_name'))]"
+                    ],
+                    "location": "[parameters('location')]",
+                    "name": "AllowAllWindowsAzureIps",
+                    "properties": {
+                        "startIpAddress": "0.0.0.0",
+                        "endIpAddress": "0.0.0.0"
+                    }
+                },
+                {
+                    "type": "firewallRules",
+                    "apiVersion": "2020-02-02-preview",
+                    "dependsOn": [
+                        "[resourceId('Microsoft.Sql/servers', variables('sql_name'))]"
+                    ],
+                    "location": "[parameters('location')]",
+                    "name": "grantIP",
+                    "properties": {
+                        "startIpAddress": "[parameters('grant_ip')]",
+                        "endIpAddress": "[parameters('grant_ip')]"
+                    }
+                }
+            ]
+        },
+
+        {
+            "name": "[variables('adf_name')]",
+            "type": "Microsoft.DataFactory/factories",
+            "location": "[parameters('location')]",
+            "apiVersion": "2018-06-01",
+            "identity": { "type": "SystemAssigned" },
+            "resources": [
+                {
+                    "name": "AzureKeyVault",
+                    "type": "linkedServices",
+                    "apiVersion": "2018-06-01",
+                    "properties": {
+                        "type": "AzureKeyVault",
+                        "typeProperties": {
+                            "baseUrl": "[variables('akvurl')]"
+                        }
+                    },
+                    "dependsOn": [
+                        "[resourceId('Microsoft.KeyVault/vaults', variables('akv_name'))]",
+                        "[resourceId('Microsoft.DataFactory/factories',variables('adf_name'))]"
+                    ]
+                },
+                {
+                    "name": "AzureSqlDatabase",
+                    "type": "linkedServices",
+                    "apiVersion": "2018-06-01",
+                    "properties": {
+                        "type": "AzureSqlDatabase",
+                        "typeProperties": {
+                            "connectionString": {
+                                "type": "AzureKeyVaultSecret",
+                                "store": {
+                                    "referenceName": "AzureKeyVault",
+                                    "type": "LinkedServiceReference"
+                                },
+                                "secretName": "sqlConnectionString"
+                            }
+                        }
+                    },
+                    "dependsOn": [
+                        "[resourceId('Microsoft.DataFactory/factories', variables('adf_name'))]",
+                        "[resourceId('Microsoft.DataFactory/factories/linkedServices',variables('adf_name'), 'AzureKeyVault')]"
+                    ]
+                }
+            ]
+        },
+        {
+            "type": "Microsoft.KeyVault/vaults",
+            "apiVersion": "2019-09-01",
+            "name": "[variables('akv_name')]",
+            "location": "[parameters('location')]",
+            "dependsOn": [
+                "[resourceId('Microsoft.DataFactory/factories',variables('adf_name'))]"
+            ],
+            "properties": {
+                "tenantId": "[subscription().tenantId]",
+                "sku": {
+                    "name": "standard",
+                    "family": "A"
+                },
+                "accessPolicies": [
+                    {
+                        "tenantId": "[subscription().tenantId]",
+                        "objectId": "[reference(resourceId('Microsoft.DataFactory/factories', variables('adf_name')), '2018-06-01', 'full').identity.principalId]",
+                        "permissions": {
+                            "secrets": [
+                                "get",
+                                "list"
+                            ]
+                        }
+                    }
+                ],
+                "enabledForDeployment": false,
+                "enabledForDiskEncryption": false,
+                "enabledForTemplateDeployment": true,
+                "enableSoftDelete": false
+            },
+            "resources": [
+                {
+                    "type": "secrets",
+                    "apiVersion": "2019-09-01",
+                    "name": "sqlConnectionString",
+                    "location": "[parameters('location')]",
+                    "dependsOn": [
+                        "[resourceId('Microsoft.KeyVault/vaults', variables('akv_name'))]"
+                    ],
+                    "properties": {
+                        "value": "[variables('sql_connection_string')]",
+                        "attributes": {
+                            "enabled": true
+                        },
+                        "contentType": "SQL Server Connection String"
+                    }
+                }
+            ]
+        }
+    ],
+    "outputs": {}
+}
