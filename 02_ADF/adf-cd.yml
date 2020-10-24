@@ -4,12 +4,6 @@ trigger:
     include:
       - adf_publish
 
-pr:
-  branches:
-    include:
-      - adf_publish
-
-
 pool:
   vmImage: "ubuntu-latest"
 
